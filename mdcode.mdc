@@ -1,0 +1,994 @@
+# mdcode: extract C code from a _markdown_ file.
+
+_markdown_ is a popular format for simple text markup which can easily
+be converted to HTML.  As it allows easy indication of sections of code,
+it is quite suitable for use in [literate programming][lp].  This file is an
+example of that usage and an implementation of software to support it.
+
+[lp]: https://en.wikipedia.org/wiki/Literate_programming
+
+The code included here provides two related functionalities.  Firstly it
+provides a library routine for extracting code out of a
+_markdown_ file, so that other routines might make use of it.
+Secondly it provides a simple client of this routine which extracts 1 or
+more C-language files from a markdown document so they can be passed to
+a C compiler.  These two combine to make a tool that is needed to
+compile this tool.  Yes, this is circular.  A prototype tool was used
+for the first extraction, though it wouldn't be hard to achieve with a
+text editor.
+
+The tool provided is specific to the C language only in that it
+generates lines like:
+
+##### Example: a _line_ command
+
+    #line __line-number__ __file-name__
+
+These allow the C compiler will report where in the markdown file any
+error is found.  This tool is suitable for any other language which
+allows the same directive, or will treat it as a comment.
+
+## Literate Details
+
+Literate programming is more than just including comments with the
+code, even nicely formatted comments.  It also involves presenting the
+code in an order that makes sense to a human, rather than an order
+that makes sense to a compiler.  For this reason a core part of any
+literate programming tool is the ability to re-arrange the code found
+in the document into a different order in the final code file -- or
+files.  This requires some form of linkage to be encoded.
+
+The approach taken here is focused around section headings, of any
+depth.
+
+All the code in any section is treated as a single sequential
+collection of code, and is named by the section that it is in.  If
+multiple sections have the same name, then the code blocks in all of
+them are joined together in the order they appear in the document.
+
+A code section can contain a special marker which starts with 2
+hashes: `##`.  This introduces what is sometimes referred to as a
+macro.  The text after the marker must be the name of some section which
+contains code.  Code from that section will be interpolated in place of
+the macro, and will be indented to match the indent of the marker.
+
+It is not permitted for the same code to be interpolated multiple
+times.  Allowing this might make some sense, but it is probably a
+mistake, and prohibiting it make some of the code a bit easier.
+
+Equally, every section of code should be interpolated at least once
+except for top-level sections.  Exactly what is allowed to constitute a
+top-level section will depend on the caller.  Different clients could
+impose different rules on the names of top-level code sections.
+
+One example of the rule imposed by the tool we have already seen.  A
+section name starting __Example:__ indicates code that is not to be
+included in the final product.  Any leading word will do.  Providing
+there is a space in the section name, and the first space is preceded by
+a colon, that section name will be assumed to be top-level.
+
+#### client functions
+
+The `struct text` used here will be explained later.
+
+	static bool is_top_level(struct text section)
+	{
+		int i;
+		for (i = 1; i < section.len; i++) {
+			if (section.txt[i] == ' ')
+				return section.txt[i-1] == ':';
+		}
+		return false;
+	}
+
+A special case of this rule exists for the leading word **File**.  These
+sections are the top level code sections that should be written to files
+-- the name of the file follows the *File:*.  Thus a section named
+**File: foo** should not be referenced by another section, and its
+contents after all references are expanded will be written to the file
+**foo**.
+
+Any section containing code that does not start with a **Word:**
+must be included in some other section exactly once.
+
+### Multiple files
+
+Allowing multiple top level code sections which name different files
+means that one _markdown_ document can describe several files.  This
+is very useful with the C language where a program file and a header
+file might be related.  For the present document we will have a header
+file and two code files, one with the library content and one for the
+tool.
+
+It will also be very convenient to create a `makefile` fragment to
+ensure the code is compiled correctly.  A simple `make -f mdcode.mk`
+will "do the right thing".
+
+### File: mdcode.mk
+
+It is assumed here that a compiled form of *md2c* is available to
+extract the source for for *md2c.c*.  As mentioned above, this is a
+boot-strap cyclic dependency which must be resolved manually.
+
+As we try to write clean code, all warnings are enabled and as this is
+sample code, debugger support is a good idea.
+
+	CFLAGS += -Wall -g
+	all::
+	mdcode.h libmdcode.c md2c.c mdcode.mk :  mdcode.mdc
+		./md2c mdcode.mdc
+
+
+### File: mdcode.h
+
+The library will provide some types and some functions.
+
+	## exported types
+	## exported functions
+
+### File: libmdcode.c
+
+Some standard header file are almost always needed.  We might need to
+add others, so make space of other includes, some private types, and
+internal function.
+
+	#include <unistd.h>
+	#include <stdlib.h>
+	#include <stdio.h>
+
+	#include "mdcode.h"
+	## internal includes
+	## internal functions
+
+### File: mdcode.mk
+
+This library file will need to be compiled by the make file.
+
+	all :: libmdcode.o
+	libmdcode.o : libmdcode.c mdcode.h
+		$(CC) $(CFLAGS) -c libmdcode.c
+
+### File: md2c.c
+
+Similar to libmdcode.c we have md2.c which will use the library and
+extract some files.
+
+	#include <unistd.h>
+	#include <stdlib.h>
+	#include <stdio.h>
+
+	#include "mdcode.h"
+
+	## client includes
+	## client functions
+
+### File: mdcode.mk
+
+	all :: md2c
+	md2c : md2c.o libmdcode.o
+		$(CC) $(CFLAGS) -o md2c md2c.o libmdcode.o
+	md2c.o : md2c.c mdcode.h
+		$(CC) $(CFLAGS) -c md2c.c
+
+## Data Structures
+
+As the core purpose of _mdcode_ is to discover and re-arrange blocks of
+text, it makes sense to map the whole document file into memory and
+produce a data structure which lists various parts of the file in the
+appropriate order.  Each node (a `code_node`) in this structure will
+have some text from the document, a child pointer to follow references,
+and a next pointer, any of which might not be present.  The child
+pointer will refer to a section, of which there may be several, linked
+together in a list.  The text is most easily stored as a pointer and a
+length.  We'll call this a `text`
+
+#### exported types
+
+	struct text {
+		char *txt;
+		int len;
+	};
+
+	struct section {
+		struct text section_name;
+		struct code_node *code;
+		struct section *next;
+		## section fields
+	};
+
+	struct code_node {
+		struct text code;
+		struct code_node *next;
+		struct section *child;
+		## code_node fields
+	};
+
+To be able to detect unused and re-used section it will help to have a
+reference count in each section.  To be able to add new code it a
+section (each section can have multiple code blocks, and there can be
+multiple sections with the same name) it will help to have reference to
+the last `code_node` added.  Finally we need to record the indent of a
+macro which references a section, so that it can be added to all code in
+the section when it is interpolated.
+
+#### section fields
+	struct code_node *last;
+	int refcnt;
+	int indent;
+
+A `code_node` will need to know the line number in the file where the
+node started, and the whether or how much it was indented in the file --
+0, 4, or 8 spaces depending on what markup was used to introduce it.
+This then needs to be stripped.
+
+#### code_node fields
+	int line_no;
+	int strip_size;
+
+### Manipulating the node
+
+Though a tree with `next` and `child` links is the easiest way to
+assemble the various code sections, it is not the easiest form for
+using them.  For that a simple list would be best.
+
+So once we have a fully linked top-level section we will want to
+linearize it, so that the `child` links become `NULL` and the `next`
+links will find everything required.  It is at this stage that the
+requirements that each section is linked only once becomes important.
+
+`code_linearize` will merge the `code_node`s from any child into the
+given `code_node`.  As it does this it will record the total indent
+which should to applied to each line to reflect the indent of all parent
+macros.  These linear code lists is what the client will receive.
+
+#### code_node fields
+	int indent;
+
+Note that we don't clear the section's `last` pointer, even though
+it no longer owns any code.  The `last` pointer is only set when a
+markdown section is found with the name, not when a macro is found which
+refers to the name.  So if `last` is NULL, then no such section has been
+found, which might be an error.
+
+##### internal functions
+
+	static void code_linearize(struct code_node *code)
+	{
+		struct code_node *t;
+		for (t = code; t; t = t->next)
+			t->indent = 0;
+		for (; code; code = code->next)
+			if (code->child) {
+				struct code_node *next = code->next;
+				struct section *child = code->child;
+				int indent = child->indent;
+
+				code->next = code->child->code;
+				code->child->code = NULL;
+				code->child = NULL;
+				for (t = code; t->next; t = t->next)
+					t->next->indent = code->indent + indent;
+				t->next = next;
+			}
+	}
+
+Once a client has made use of a linearised code set, it will probably
+want to free it.  If a `code_node` is freed before it has been
+linearised, it is simple to linearise it, then free it.
+
+	void code_free(struct code_node *code)
+	{
+		while (code) {
+			struct code_node *this;
+			if (code->child)
+				code_linearize(code);
+			this = code;
+			code = code->next;
+			free(this);
+		}
+	}
+
+##### exported functions
+
+	void code_free(struct code_node *code);
+
+### Building the tree
+
+As we parse the document there are two things we will want to do to
+node trees: add some text or add a reference.  We'll assume for now
+that the relevant section structures have been found, and will just
+deal with the `code_node`.
+
+Adding text simply means adding another node.  If there was a code
+marker (e.g. `~~~`) then there is no indent to strip, otherwise there is.
+
+##### internal functions
+
+	static void code_add_text(struct section *where, struct text txt,
+	                          int line_no, bool was_marked)
+	{
+		struct code_node *n;
+		if (txt.len == 0)
+			return;
+		n = calloc(1, sizeof(*n));
+		n->code = txt;
+		n->line_no = line_no;
+		if (was_marked) {
+			n->strip_size = 0;
+		} else {
+			if (txt.txt[0] == '\t')
+				n->strip_size = 8;
+			else
+				n->strip_size = 4;
+		}
+		if (where->last)
+			where->last->next = n;
+		else
+			where->code = n;
+		where->last = n;
+	}
+
+When adding a link, we might be able to include it in the last
+`code_node` if it currently only has text.
+
+	void code_add_link(struct section *where, struct section *to,
+			   int indent)
+	{
+		struct code_node *n;
+
+		to->indent = indent;
+		to->refcnt++;	// this will be checked elsewhere
+		if (where->last && where->last->child == NULL) {
+			where->last->child = to;
+			return;
+		}
+		n = calloc(1, sizeof(*n));
+		n->child = to;
+		if (where->last)
+			where->last->next = n;
+		else
+			where->code = n;
+		where->last = n;
+	}
+
+### Finding sections
+
+Now we need a lookup table to be able to find sections by name.
+Something that provides an `n*log(N)` search time is probably
+justified, but for now I want a minimal stand-alone program so a
+linked list managed by insertion-sort will do.
+
+The text compare function will likely be useful for any clients of our
+library, so we may as well export it.
+
+If we cannot find a section, we simply want to create it.  This allows
+sections and references to be created in any order.  Sections with
+no references or no content will cause a warning eventually.
+
+#### exported functions
+
+	int text_cmp(struct text a, struct text b);
+
+#### internal functions
+
+	int text_cmp(struct text a, struct text b)
+	{
+		int len = a.len;
+		if (len > b.len)
+			len = b.len;
+		int cmp = strncmp(a.txt, b.txt, len);
+		if (cmp)
+			return cmp;
+		else
+			return a.len - b.len;
+	}
+
+	static struct section *section_find(struct section **list, struct text name)
+	{
+		struct section *new;
+		for (; *list; list = &(*list)->next) {
+			int cmp = text_cmp((*list)->section_name, name);
+			if (cmp == 0)
+				return *list;
+			if (cmp > 0)
+				break;
+		}
+		/* Add the section here */
+		new = calloc(1, sizeof(*new));
+		new->next = *list;
+		*list = new;
+		new->section_name = name;
+		return new;
+	}
+
+## Parsing the _markdown_
+
+Parsing markdown is fairly easy, though there are complications.
+
+The document is divided into "paragraphs" which are mostly separated by blank
+lines (which may contain white space).  The first few characters of
+the first line of a paragraph determine the type of paragraph.  For
+our purposes we are only interested in list paragraphs, code
+paragraphs, section headings, and everything else.  Section headings
+are single-line paragraphs and so do not require a preceding or
+following blank line.
+
+Section headings start with 1 or more hash characters (__#__) -- the
+alternate which underline headings with multiple hyphen or equal signs
+is not supported.  List paragraphs start with hyphen, asterisk, plus,
+or digits followed by a period.  Code paragraphs aren't quite so easy.
+
+The "standard" code paragraph starts with 4 or more spaces, or a tab.
+However if the previous paragraph was a list paragraph, then those
+spaces indicate another paragraph in the same list item, and 8 or
+more spaces are required.  Unless a nested list is in effect, in
+which case 12 or more are need.   Unfortunately not all _markdown_
+parsers agree on nested lists.
+
+Two alternate styles for marking code are in active use.  "Github" uses
+three backticks(_`` ``` ``_), while "pandoc" uses three or more tildes
+(_~~~_).  In these cases the code should not be indented.
+
+Trying to please everyone as much as possible, this parser will handle
+everything except for code inside lists.
+
+So an indented (4+) paragraph after a list paragraph is always a list
+paragraph, otherwise it is a code paragraph.  A paragraph that starts
+with three backticks or three tildes is code which continues until a
+matching string of backticks or tildes.
+
+### Skipping bits
+
+While walking the document looking for various markers we will *not* use
+the `struct text` introduced earlier to track remaining content.  Doing
+that requires updating both start and length to advance, which feels
+clumsy.  Instead we will carry `pos` and `end` pointers, only the first
+of which needs to change.
+
+So to start, we need to skip various parts of the document.  `lws`
+stands for "Linear White Space" and is a term that comes from the
+Email RFCs (e.g. RFC822).  `line` and `para` are self explanatory.
+Note that `skip_para` needs to update the current line number.
+`skip_line` doesn't but every caller should.
+
+#### internal functions
+
+	static char *skip_lws(char *pos, char *end)
+	{
+		while (pos < end && (*pos == ' ' || *pos == '\t'))
+			pos++;
+		return pos;
+	}
+
+	static char *skip_line(char *pos, char *end)
+	{
+		while (pos < end && *pos != '\n')
+			pos++;
+		if (pos < end)
+			pos++;
+		return pos;
+	}
+
+	static char *skip_para(char *pos, char *end, int *line_no)
+	{
+		/* Might return a pointer to a blank line, as only
+		 * one trailing blank line is skipped
+		 */
+		if (*pos == '#') {
+			pos = skip_line(pos, end);
+			(*line_no) += 1;
+			return pos;
+		}
+		while (pos < end &&
+		       *pos != '#' &&
+		       *(pos = skip_lws(pos, end)) != '\n') {
+			pos = skip_line(pos, end);
+			(*line_no) += 1;
+		}
+		if (pos < end && *pos == '\n') {
+			pos++;
+			(*line_no) += 1;
+		}
+		return pos;
+	}
+
+### Recognising things
+
+Recognising a section header is trivial and doesn't require a
+function.  However we need to extract the content of a section header
+as a `struct text` for passing to `section_find()`.
+Recognising the start of a new list is fairly easy.  Recognising the
+start (and end) of code is a little messy so we provide a function for
+matching the first few characters, which has a special case for "4
+spaces or tab".
+
+#### internal includes
+
+	#include  <ctype.h>
+	#include  <string.h>
+
+#### internal functions
+
+	static struct text take_header(char *pos, char *end)
+	{
+		struct text section;
+
+		while (pos < end && *pos == '#')
+			pos++;
+		while (pos < end && *pos == ' ')
+			pos++;
+		section.txt = pos;
+		while (pos < end && *pos != '\n')
+			pos++;
+		// A section heading can have trailing #
+		while (pos > section.txt &&
+		       (pos[-1] == '#' || pos[-1] == ' '))
+			pos--;
+		section.len = pos - section.txt;
+		return section;
+	}
+
+	static int is_list(char *pos, char *end)
+	{
+		if (strchr("-*+", *pos))
+			return 1;
+		if (isdigit(*pos)) {
+			while (pos < end && isdigit(*pos))
+				pos += 1;
+			if  (pos < end && *pos == '.')
+				return 1;
+		}
+		return 0;
+	}
+
+	static int matches(char *start, char *pos, char *end)
+	{
+		if (start == NULL)
+			return matches("\t", pos, end) ||
+			       matches("    ", pos, end);
+		return (pos + strlen(start) < end &&
+			strncmp(pos, start, strlen(start)) == 0);
+	}
+
+### Extracting the code
+
+Now that we can skip paragraphs and recognise what type each paragraph
+is, it is time to parse the file and extract the code.  We'll do this
+in two parts, first we look at what to do with some code once we
+find it, and then how to actually find it.
+
+When we have some code, we know where it is, what the end marker
+should look like, and which section it is in.
+
+There are two sorts of end markers: the presence of a particular
+string, or the absence of an indent.  We will use a string to
+represent a presence, and a `NULL` to represent the absence.
+
+While looking at code we don't think about paragraphs at all - just
+look for a line that starts with the right thing.
+Every line that is still code then needs to be examined to see if it
+is a section reference.
+
+When a section reference is found, all preceding code (if any) must be
+added to the current section, then the reference is added.
+
+When we do find the end of the code, all text that we have found but
+not processed needs to be saved too.
+
+When adding a reference we need to set the `indent`.  This is the
+number of spaces (counting 8 for tabs) after the natural indent of the
+code (which is a tab or 4 spaces).  We use a separate function `count_spaces`
+for that.
+
+If there are completely blank lines (no indent) at the end of the found
+code, these should be considered to be spacing between the code and the
+next section, and so not included in the code.  When a marker is used to
+explicitly mark the end of the code, we don't need to check for these
+blank lines.
+
+#### internal functions
+
+	static int count_space(char *sol, char *p)
+	{
+		int c = 0;
+		while (sol < p) {
+			if (sol[0] == ' ')
+				c++;
+			if (sol[0] == '\t')
+				c+= 8;
+			sol++;
+		}
+		return c;
+	}
+
+	static char *take_code(char *pos, char *end, char *marker,
+			       struct section **table, struct text section,
+			       int *line_nop)
+	{
+		char *start = pos;
+		int line_no = *line_nop;
+		int start_line = line_no;
+		struct section *sect;
+
+		sect = section_find(table, section);
+
+		while (pos < end) {
+			char *sol, *t;
+			struct text ref;
+
+			if (marker && matches(marker, pos, end))
+				break;
+			if (!marker &&
+			    (skip_lws(pos, end))[0] != '\n' &&
+			    !matches(NULL, pos, end))
+				/* Paragraph not indented */
+				break;
+
+			/* Still in code - check for reference */
+			sol = pos;
+			if (!marker) {
+				if (*sol == '\t')
+					sol++;
+				else if (strcmp(sol, "    ") == 0)
+					sol += 4;
+			}
+			t = skip_lws(sol, end);
+			if (t[0] != '#' || t[1] != '#') {
+				/* Just regular code here */
+				pos = skip_line(sol, end);
+				line_no++;
+				continue;
+			}
+
+			if (pos > start) {
+				struct text txt;
+				txt.txt = start;
+				txt.len = pos - start;
+				code_add_text(sect, txt, start_line, !!marker);
+			}
+			ref = take_header(t, end);
+			if (ref.len) {
+				struct section *refsec = section_find(table, ref);
+				code_add_link(sect, refsec, count_space(sol, t));
+			}
+			pos = skip_line(t, end);
+			line_no++;
+			start = pos;
+			start_line = line_no;
+		}
+		if (pos > start) {
+			struct text txt;
+			txt.txt = start;
+			txt.len = pos - start;
+			/* strip trailing blank lines */
+			while (!marker && txt.len > 2 &&
+			       start[txt.len-1] == '\n' &&
+			       start[txt.len-2] == '\n')
+				txt.len -= 1;
+
+			code_add_text(sect, txt, start_line, !!marker);
+		}
+		if (marker) {
+			pos = skip_line(pos, end);
+			line_no++;
+		}
+		*line_nop = line_no;
+		return pos;
+	}
+
+### Finding the code
+
+It is when looking for the code that we actually use the paragraph
+structure.  We need to recognise section headings so we can record the
+name, list paragraphs so we can ignore indented follow-on paragraphs,
+and the three different markings for code.
+
+#### internal functions
+
+	static struct section *code_find(char *pos, char *end)
+	{
+		struct section *table = NULL;
+		bool in_list = false;
+		int line_no = 1;
+		struct text section = {};
+
+		while (pos < end) {
+			if (pos[0] == '#') {
+				section = take_header(pos, end);
+				in_list = false;
+				pos = skip_line(pos, end);
+				line_no++;
+			} else if (is_list(pos, end)) {
+				in_list = true;
+				pos = skip_para(pos, end, &line_no);
+			} else if (!in_list && matches(NULL, pos, end)) {
+				pos = take_code(pos, end, NULL, &table,
+						section, &line_no);
+			} else if (matches("```", pos, end)) {
+				in_list = false;
+				pos = skip_line(pos, end);
+				line_no++;
+				pos = take_code(pos, end, "```", &table,
+						section, &line_no);
+			} else if (matches("~~~", pos, end)) {
+				in_list = false;
+				pos = skip_line(pos, end);
+				line_no++;
+				pos = take_code(pos, end, "~~~", &table,
+						section, &line_no);
+			} else {
+				if (!isspace(*pos))
+					in_list = false;
+				pos = skip_para(pos, end, &line_no);
+			}
+		}
+		return table;
+	}
+
+### Returning the code
+
+Having found all the code blocks and gathered them into a list of
+sections, we are now ready to return them to the caller.  This is where
+to perform consistency checks, like at most one reference and at least
+one definition for each section.
+
+All the sections with no references are returned in a list for the
+caller to consider.  They are linearized first so that the substructure
+is completely hidden -- except for the small amount of structure
+displayed in the line numbers.
+
+To return errors, we have the caller pass a function which takes an
+error message - a `code_err_fn`.
+
+#### exported types
+
+	typedef void (*code_err_fn)(char *msg);
+
+#### internal functions
+
+	struct section *code_extract(char *pos, char *end, code_err_fn error)
+	{
+		struct section *table;
+		struct section *result = NULL;
+		struct section *tofree = NULL;
+
+		table = code_find(pos, end);
+
+		while (table) {
+			struct section *t = table->next;
+			if (table->last == NULL) {
+				char *msg;
+				asprintf(&msg,
+					"Section \"%.*s\" is referenced but not declared",
+					 table->section_name.len, table->section_name.txt);
+				error(msg);
+				free(msg);
+			}
+			if (table->refcnt == 0) {
+				/* Root-section,  return it */
+				table->next = result;
+				result = table;
+				code_linearize(result->code);
+			} else {
+				table->next = tofree;
+				tofree = table;
+				if (table->refcnt > 1) {
+					char *msg;
+					asprintf(&msg,
+						 "Section \"%.*s\" referenced multiple times (%d).",
+						 table->section_name.len, table->section_name.txt,
+						 table->refcnt);
+					error(msg);
+					free(msg);
+				}
+			}
+			table = t;
+		}
+		/* Free all the non-top-level section - their code will
+		 * be moved to a top-level.
+		 */
+		while (tofree) {
+			struct section *t = tofree->next;
+			free(tofree);
+			tofree = t;
+		}
+		return result;
+	}
+
+##### exported functions
+
+	struct section *code_extract(char *pos, char *end, code_err_fn error);
+
+## Using the library
+
+Now that we can extract code from a document and link it all together
+it is time to do something with that code.  Firstly we need to print
+it out.
+
+### Printing the Code
+
+Printing is mostly straight forward - we just walk the list and print
+the code sections, adding whatever indent is required for each line.
+However there is a complication (isn't there always)?
+
+For code that was recognised because the paragraph was indented, we
+need to strip that indent first.  Fortunately we recorded the
+`strip_size` in each `code_node` so that is easy to do.
+
+The indents we insert will mostly be spaces.  All-spaces doesn't work
+for `Makefiles`, so if the indent is 8 or more, we use a TAB first.
+
+If the caller provides a file name, we include a `#line` line at the
+start of each `code_node` so that line numbers in that original file can
+be determined.
+
+##### internal functions
+
+	void code_node_print(FILE *out, struct code_node *node, char *fname)
+	{
+		for (; node; node = node->next) {
+			char *c = node->code.txt;
+			int len = node->code.len;
+
+			if (!len)
+				continue;
+
+			if (fname)
+				fprintf(out, "#line %d \"%s\"\n",
+					node->line_no, fname);
+			while (len && *c) {
+				if (node->indent >= 8)
+					fprintf(out, "\t%*s", node->indent - 8, "");
+				else
+					fprintf(out, "%*s", node->indent, "");
+				if (node->strip_size && len > 1) {
+					if (*c == '\t') {
+						c++;
+						len--;
+					} else if (*c == ' ') {
+						int s = node->strip_size;
+						if (s > len)
+							s = len;
+						c += s;
+						len-= s;
+					}
+				}
+				do {
+					fputc(*c, out);
+					c++;
+					len--;
+				} while (len && c[-1] != '\n');
+			}
+		}
+	}
+
+###### exported functions
+	void code_node_print(FILE *out, struct code_node *node, char *fname);
+
+### Bringing it all together
+
+We are just about ready for the `main` function of the tool which will
+extract all this lovely code and compile it.  Just one helper is still
+needed.
+
+#### Handling filenames
+
+Section names are stored in `struct text` which is not `nul`
+terminated.  Filenames passed to `open` need to be null terminated.
+So we need to convert one to the other, and strip the leading `File:`
+off while we are at it.
+
+##### client functions
+
+	static void copy_fname(char *name, int space, struct text t)
+	{
+		char *sec = t.txt;
+		int len = t.len;
+		name[0] = 0;
+		if (len < 5 || strncmp(sec, "File:", 5) != 0)
+			return;
+		sec += 5;
+		len -= 5;
+		while (len && sec[0] == ' ') {
+			sec++;
+			len--;
+		}
+		if (len >= space)
+			len = space - 1;
+		strncpy(name, sec, len);
+		name[len] = 0;
+	}
+
+#### Main
+
+And now we take a single file name, extract the code, and if there are
+no errors we write out a file for each appropriate code section.  And
+we are done.  Alternately if a second arg is given we assume it is a
+top-level section name and we write only that section to standard output.
+
+##### client includes
+
+	#include <fcntl.h>
+	#include <errno.h>
+	#include <sys/mman.h>
+	#include <string.h>
+
+##### client functions
+
+	static int errs;
+	static void pr_err(char *msg)
+	{
+		errs++;
+		fprintf(stderr, "%s\n", msg);
+	}
+
+	int main(int argc, char *argv[])
+	{
+		int fd;
+		size_t len;
+		char *file;
+		struct text section = {};
+		struct section *table, *s, *prev;
+
+		errs = 0;
+		if (argc != 2 && argc != 3) {
+			fprintf(stderr, "Usage: mdcode file.mdc [section]\n");
+			exit(2);
+		}
+		if (argc == 3) {
+			section.txt = argv[2];
+			section.len = strlen(argv[2]);
+		}
+
+		fd = open(argv[1], O_RDONLY);
+		if (fd < 0) {
+			fprintf(stderr, "mdcode: cannot open %s: %s\n",
+				argv[1], strerror(errno));
+			fprintf(stderr, "Usage: mdcode file.mdc [section]\n");
+			exit(1);
+		}
+		len = lseek(fd, 0, 2);
+		file = mmap(NULL, len, PROT_READ, MAP_SHARED, fd, 0);
+		table = code_extract(file, file+len, pr_err);
+
+		for (s = table; s;
+			(code_free(s->code), prev = s, s = s->next, free(prev))) {
+			FILE *fl;
+			char fname[1024];
+
+			if (is_top_level(s->section_name)) {
+				if (strncmp(s->section_name.txt, "File: ", 6) != 0 &&
+				    (section.txt == NULL ||
+				     text_cmp(s->section_name, section) != 0))
+					/* Ignore this section */
+					continue;
+			} else {
+				fprintf(stderr, "Code in unreferenced section that is not ignored or a file name: %.*s\n",
+					s->section_name.len, s->section_name.txt);
+				errs++;
+				continue;
+			}
+			if (section.txt) {
+				if (text_cmp(s->section_name, section) == 0)
+					code_node_print(stdout, s->code, argv[1]);
+				break;
+			}
+			copy_fname(fname, sizeof(fname), s->section_name);
+			if (fname[0] == 0) {
+				fprintf(stderr, "Missing file name at:%.*s\n",
+					s->section_name.len, s->section_name.txt);
+				errs++;
+				continue;
+			}
+			fl = fopen(fname, "w");
+			if (!fl) {
+				fprintf(stderr, "Cannot create %s: %s\n",
+					fname, strerror(errno));
+				errs++;
+				continue;
+			}
+			code_node_print(fl, s->code, argv[1]);
+			fclose(fl);
+		}
+		exit(!!errs);
+	}

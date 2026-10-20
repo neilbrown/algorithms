@@ -1,0 +1,6 @@
+*.c
+*.o
+*.h
+*.mk
+boot-strap/md2c
+md2c
